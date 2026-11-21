@@ -1,0 +1,17 @@
+[package]
+name = "axagent-plugin-proto"
+# 内联字段（不继承 workspace）：本 crate 是插件 SDK 的协议层，独立仓验证形态
+# （axagent-plugins 目录拷出、随行本 crate）下没有 axagent-core workspace 根，
+# 任何 `workspace = true` 继承都会让 manifest 解析失败（SDKTEST_EXIT=101 实证）。
+# 版本演进：改这里后同步 CHANGELOG（axagent-plugins/CHANGELOG.md §3.0.0 有指针）。
+version = "3.0.1"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/polite0803/AxInvest"
+description = "AxAgent 插件帧协议：宿主与插件 worker 共用的长度前缀 JSON 帧与命令协议"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+

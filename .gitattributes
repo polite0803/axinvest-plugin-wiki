@@ -1,0 +1,4 @@
+# 由主仓生成器复制的 vendored 脚本，不计入 GitHub Linguist 语言统计。
+scripts/build-plugin-bundle.mjs linguist-vendored
+scripts/check-release-dependencies.mjs linguist-vendored
+generate-plugin-release-manifest.mjs linguist-vendored

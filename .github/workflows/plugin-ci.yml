@@ -1,0 +1,45 @@
+name: Plugin CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUST_BACKTRACE: short
+  PLUGIN_NAME: wiki
+  PLUGIN_VERSION: 3.0.1
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.0"
+          components: rustfmt, clippy
+      - name: Install bundle-only Node dependencies
+        if: hashFiles('package.json') != ''
+        run: npm install --no-audit --no-fund
+      - name: Check independent repository boundaries
+        run: node scripts/check-release-dependencies.mjs
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+      - name: Check Rust sources
+        run: cargo check --workspace --all-targets
+      - name: Test Rust sources
+        run: cargo test --workspace --all-targets
+      - name: Lint Rust sources
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build and verify plugin bundle
+        run: node scripts/build-plugin-bundle.mjs --plugin "${PLUGIN_NAME}" --plugin-version "${PLUGIN_VERSION}" --check --out "dist/plugins/${PLUGIN_NAME}"

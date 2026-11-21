@@ -1,0 +1,395 @@
+{
+  "note": "P6.2 域包插件边界底册。id/domain/capabilities 从 manifest 抽取；page 从 src/pages/opc/routes.tsx 当前声明转录。新增或改名必须同批改 manifest、routes 与本底册。",
+  "version": 1,
+  "policy": {
+    "unit": "domain_pack",
+    "granularity": "one_plugin_per_domain_pack",
+    "forbiddenAggregation": [
+      "8+1 CapabilityDomain 粗域合并",
+      "单一 plugin-opc 承接全部 OPC 域包"
+    ],
+    "commandOwnership": {
+      "domainPackCommand": "由目标域包插件声明；插件 id = plugin-opc-<domain_pack_id>",
+      "sharedCommand": "不属于任何域包时归 plugin-opc-common；不得复制到 14 个域包插件",
+      "commandAliases": "同一后端能力允许多个命令别名，但只能被一个插件声明；owner 与 aliases 必须显式登记"
+    },
+    "verticalSlices": [
+      {
+        "phase": 1,
+        "domainPackId": "accounting",
+        "pluginId": "plugin-opc-accounting",
+        "transportOwner": "opc-accounting",
+        "manifestStrategy": "independent-worker",
+        "reason": "批 1 垂直切片：发票列表 / 创建 / 状态变更三条命令迁独立 worker；其余会计能力仍属公共底座"
+      },
+      {
+        "phase": 2,
+        "domainPackId": "security",
+        "pluginId": "plugin-opc-security",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 三条能力均为宿主共享 Tool（OpcSearchWiki/WebSearch/FileWrite），无 OPC worker 命令；独立插件贡献域包清单与页面资产，不复制公共底座"
+      },
+      {
+        "phase": 3,
+        "domainPackId": "game_dev",
+        "pluginId": "plugin-opc-game-dev",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 三条能力均为宿主通用 Tool，无 OPC worker 命令；验证声明式插件模板可连续复制"
+      },
+      {
+        "phase": 4,
+        "domainPackId": "ai_research",
+        "pluginId": "plugin-opc-ai-research",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 无专属 worker 命令；独立插件贡献域包清单与页面资产，共享能力归公共底座"
+      },
+      {
+        "phase": 5,
+        "domainPackId": "consulting",
+        "pluginId": "plugin-opc-consulting",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 无专属 worker 命令；独立插件贡献域包清单与页面资产，共享能力归公共底座"
+      },
+      {
+        "phase": 6,
+        "domainPackId": "design",
+        "pluginId": "plugin-opc-design",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 无专属 worker 命令；独立插件贡献域包清单与页面资产，共享能力归公共底座"
+      },
+      {
+        "phase": 7,
+        "domainPackId": "ecommerce",
+        "pluginId": "plugin-opc-ecommerce",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 无专属 worker 命令；独立插件贡献域包清单与页面资产，共享能力归公共底座"
+      },
+      {
+        "phase": 8,
+        "domainPackId": "education",
+        "pluginId": "plugin-opc-education",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 无专属 worker 命令；独立插件贡献域包清单与页面资产，共享能力归公共底座"
+      },
+      {
+        "phase": 9,
+        "domainPackId": "finance_invest",
+        "pluginId": "plugin-opc-finance-invest",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 无专属 worker 命令；独立插件贡献域包清单与页面资产，共享能力归公共底座"
+      },
+      {
+        "phase": 10,
+        "domainPackId": "geospatial",
+        "pluginId": "plugin-opc-geospatial",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 无专属 worker 命令；独立插件贡献域包清单与页面资产，共享能力归公共底座"
+      },
+      {
+        "phase": 11,
+        "domainPackId": "project_management",
+        "pluginId": "plugin-opc-project-management",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 无专属 worker 命令；独立插件贡献域包清单与页面资产，共享能力归公共底座"
+      },
+      {
+        "phase": 12,
+        "domainPackId": "software_dev",
+        "pluginId": "plugin-opc-software-dev",
+        "transportOwner": "plugin-opc-common",
+        "manifestStrategy": "declarative-only",
+        "reason": "manifest 无专属 worker 命令；独立插件贡献域包清单与页面资产，共享能力归公共底座"
+      },
+      {
+        "phase": 13,
+        "domainPackId": "sales_growth",
+        "pluginId": "plugin-opc-sales-growth",
+        "transportOwner": "opc-sales-growth",
+        "manifestStrategy": "independent-worker",
+        "reason": "三条域包 worker 命令迁独立插件，复用 plugin-opc-core 泛型 helper"
+      },
+      {
+        "phase": 14,
+        "domainPackId": "content_media",
+        "pluginId": "plugin-opc-content-media",
+        "transportOwner": "opc-content-media",
+        "manifestStrategy": "independent-worker",
+        "reason": "八条内容/发布计划命令迁独立 worker，复用 plugin-opc-core 泛型 helper"
+      }
+    ],
+    "sharedCommands": [
+      "search_wiki",
+      "create_content_asset",
+      "list_customers",
+      "create_landing_page",
+      "create_project",
+      "record_kpi",
+      "create_publish_schedule",
+      "add_milestone",
+      "get_dashboard",
+      "list_projects",
+      "get_financial_report",
+      "opc_list_projects",
+      "opc_get_dashboard",
+      "opc_list_kpis",
+      "opc_get_financial_report",
+      "opc_get_capability_pack_config",
+      "opc_get_capability_pack_dashboard"
+    ]
+  },
+  "packs": [
+    {
+      "id": "accounting",
+      "domain": "finance",
+      "pluginId": "plugin-opc-accounting",
+      "page": {
+        "id": "domain:finance-accounting",
+        "path": "/opc/domain/accounting"
+      },
+      "capabilities": [
+        "tool:OpcListInvoices",
+        "tool:OpcCreateInvoice",
+        "tool:OpcGetFinancialReport",
+        "tool:OpcListCustomers",
+        "tool:OpcRecordKpi",
+        "tool:OpcTransitionInvoice"
+      ],
+      "assetDir": "config/opc/domain_packs/accounting"
+    },
+    {
+      "id": "ai_research",
+      "domain": "data_analysis",
+      "pluginId": "plugin-opc-ai-research",
+      "page": {
+        "id": "domain:data-ai-research",
+        "path": "/opc/domain/ai-research"
+      },
+      "capabilities": [
+        "tool:OpcListProjects",
+        "tool:OpcSearchWiki",
+        "tool:WebSearch",
+        "tool:FileRead",
+        "tool:Bash",
+        "tool:FileWrite"
+      ],
+      "assetDir": "config/opc/domain_packs/ai_research"
+    },
+    {
+      "id": "consulting",
+      "domain": "data_analysis",
+      "pluginId": "plugin-opc-consulting",
+      "page": {
+        "id": "domain:automation-consulting",
+        "path": "/opc/domain/consulting"
+      },
+      "capabilities": [
+        "tool:OpcSearchWiki",
+        "tool:WebSearch",
+        "tool:OpcGetDashboard",
+        "tool:OpcCreateContentAsset",
+        "tool:FileWrite"
+      ],
+      "assetDir": "config/opc/domain_packs/consulting"
+    },
+    {
+      "id": "content_media",
+      "domain": "content_creation",
+      "pluginId": "plugin-opc-content-media",
+      "page": {
+        "id": "domain:content-media",
+        "path": "/opc/domain/content-media"
+      },
+      "capabilities": [
+        "tool:OpcListBlogPosts",
+        "tool:WebSearch",
+        "tool:OpcCreateBlogPost",
+        "tool:FileWrite",
+        "tool:FileRead",
+        "tool:OpcCreatePublishSchedule",
+        "tool:OpcListPublishSchedules",
+        "tool:OpcCreateContentAsset",
+        "tool:OpcListContentAssets",
+        "tool:OpcUpdateContentAsset",
+        "tool:OpcDeleteContentAsset",
+        "tool:OpcCancelPublishSchedule",
+        "tool:OpcProcessDueSchedules"
+      ],
+      "assetDir": "config/opc/domain_packs/content_media"
+    },
+    {
+      "id": "design",
+      "domain": "ai_media",
+      "pluginId": "plugin-opc-design",
+      "page": {
+        "id": "domain:content-design",
+        "path": "/opc/domain/design"
+      },
+      "capabilities": [
+        "tool:WebSearch",
+        "tool:FileWrite",
+        "tool:OpcCreateContentAsset",
+        "tool:OpcCreateLandingPage"
+      ],
+      "assetDir": "config/opc/domain_packs/design"
+    },
+    {
+      "id": "ecommerce",
+      "domain": "content_creation",
+      "pluginId": "plugin-opc-ecommerce",
+      "page": {
+        "id": "domain:automation-ecommerce",
+        "path": "/opc/domain/ecommerce"
+      },
+      "capabilities": [
+        "tool:WebSearch",
+        "tool:OpcSearchWiki",
+        "tool:OpcListCustomers",
+        "tool:OpcCreateContentAsset",
+        "tool:OpcCreateLandingPage"
+      ],
+      "assetDir": "config/opc/domain_packs/ecommerce"
+    },
+    {
+      "id": "education",
+      "domain": "content_creation",
+      "pluginId": "plugin-opc-education",
+      "page": {
+        "id": "domain:content-education",
+        "path": "/opc/domain/education"
+      },
+      "capabilities": [
+        "tool:WebSearch",
+        "tool:OpcCreateContentAsset",
+        "tool:OpcCreateLandingPage",
+        "tool:FileWrite"
+      ],
+      "assetDir": "config/opc/domain_packs/education"
+    },
+    {
+      "id": "finance_invest",
+      "domain": "finance",
+      "pluginId": "plugin-opc-finance-invest",
+      "page": {
+        "id": "domain:finance-analysis",
+        "path": "/opc/domain/finance-invest"
+      },
+      "capabilities": [
+        "tool:OpcGetDashboard",
+        "tool:OpcListKpis",
+        "tool:OpcSearchWiki",
+        "tool:OpcListProjects",
+        "tool:OpcGetFinancialReport",
+        "tool:OpcRecordKpi"
+      ],
+      "assetDir": "config/opc/domain_packs/finance_invest"
+    },
+    {
+      "id": "game_dev",
+      "domain": "ai_media",
+      "pluginId": "plugin-opc-game-dev",
+      "page": {
+        "id": "domain:ai-media-game",
+        "path": "/opc/domain/game-dev"
+      },
+      "capabilities": [
+        "tool:WebSearch",
+        "tool:FileWrite",
+        "tool:FileRead"
+      ],
+      "assetDir": "config/opc/domain_packs/game_dev"
+    },
+    {
+      "id": "geospatial",
+      "domain": "data_analysis",
+      "pluginId": "plugin-opc-geospatial",
+      "page": {
+        "id": "domain:data-geospatial",
+        "path": "/opc/domain/geospatial"
+      },
+      "capabilities": [
+        "tool:OpcSearchWiki",
+        "tool:WebSearch",
+        "tool:OpcCreateContentAsset",
+        "tool:OpcCreateProject",
+        "tool:FileWrite"
+      ],
+      "assetDir": "config/opc/domain_packs/geospatial"
+    },
+    {
+      "id": "project_management",
+      "domain": "devops",
+      "pluginId": "plugin-opc-project-management",
+      "page": {
+        "id": "domain:automation-projects",
+        "path": "/opc/domain/project-management"
+      },
+      "capabilities": [
+        "tool:OpcCreateProject",
+        "tool:OpcAddMilestone",
+        "tool:OpcListProjects"
+      ],
+      "assetDir": "config/opc/domain_packs/project_management"
+    },
+    {
+      "id": "sales_growth",
+      "domain": "content_creation",
+      "pluginId": "plugin-opc-sales-growth",
+      "page": {
+        "id": "domain:automation-sales",
+        "path": "/opc/domain/sales-growth"
+      },
+      "capabilities": [
+        "tool:OpcCreateCustomer",
+        "tool:OpcListCustomers",
+        "tool:OpcCreateLandingPage",
+        "tool:WebSearch",
+        "tool:OpcCreatePublishSchedule",
+        "tool:OpcListLandingPages",
+        "tool:OpcListContacts"
+      ],
+      "assetDir": "config/opc/domain_packs/sales_growth"
+    },
+    {
+      "id": "security",
+      "domain": "devops",
+      "pluginId": "plugin-opc-security",
+      "page": {
+        "id": "domain:devops-security",
+        "path": "/opc/domain/security"
+      },
+      "capabilities": [
+        "tool:OpcSearchWiki",
+        "tool:WebSearch",
+        "tool:FileWrite"
+      ],
+      "assetDir": "config/opc/domain_packs/security"
+    },
+    {
+      "id": "software_dev",
+      "domain": "devops",
+      "pluginId": "plugin-opc-software-dev",
+      "page": {
+        "id": "domain:devops-software",
+        "path": "/opc/domain/software-dev"
+      },
+      "capabilities": [
+        "tool:OpcListProjects",
+        "tool:OpcCreateProject",
+        "tool:FileWrite",
+        "tool:WebSearch",
+        "tool:OpcAddMilestone"
+      ],
+      "assetDir": "config/opc/domain_packs/software_dev"
+    }
+  ]
+}

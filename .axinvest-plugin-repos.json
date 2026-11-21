@@ -1,0 +1,8 @@
+{
+  "owner": "polite0803",
+  "repo": "axinvest-plugin-wiki",
+  "plugin": "wiki",
+  "rustVersion": "3.0.1",
+  "pluginVersion": "3.0.1",
+  "releaseManifestUrl": "https://github.com/polite0803/axinvest-plugin-wiki/releases/latest/download/release.json"
+}

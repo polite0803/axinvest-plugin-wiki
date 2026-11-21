@@ -1,0 +1,165 @@
+name: Release Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing tag, for example v3.0.1
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUST_BACKTRACE: short
+  PLUGIN_NAME: wiki
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos
+            arch: x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos
+            arch: aarch64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - os: windows
+            arch: x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - os: windows
+            arch: aarch64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.0"
+          components: rustfmt, clippy
+      - name: Install bundle-only Node dependencies
+        if: hashFiles('package.json') != ''
+        run: npm install --no-audit --no-fund
+      - name: Check independent repository boundaries
+        run: node scripts/check-release-dependencies.mjs
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+      - name: Check Rust sources
+        run: cargo check --workspace --all-targets
+      - name: Test Rust sources
+        run: cargo test --workspace --all-targets
+      - name: Lint Rust sources
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build, verify, and package release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${PLUGIN_NAME}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+          node scripts/build-plugin-bundle.mjs --plugin "${PLUGIN_NAME}" --plugin-version "${RELEASE_TAG#v}" --release --target "${{ matrix.target }}" --check --out "dist/plugins/${PLUGIN_NAME}"
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const manifest = JSON.parse(fs.readFileSync("dist/plugins/" + process.env.PLUGIN_NAME + "/plugin.json", "utf8"));
+          const expected = "v" + manifest.version;
+          if (process.env.RELEASE_TAG !== expected) {
+            console.error("release tag " + process.env.RELEASE_TAG + " does not match plugin version " + expected);
+            process.exit(1);
+          }
+          NODE
+          node generate-plugin-release-manifest.mjs \
+            --bundle "dist/plugins/${PLUGIN_NAME}" \
+            --artifact-url "${artifact_url}" \
+            --os "${{ matrix.os }}" \
+            --arch "${{ matrix.arch }}" \
+            --out "dist/release/${{ matrix.os }}-${{ matrix.arch }}"
+          node generate-plugin-release-manifest.mjs \
+            --check \
+            --bundle "dist/plugins/${PLUGIN_NAME}" \
+            --artifact-url "${artifact_url}" \
+            --os "${{ matrix.os }}" \
+            --arch "${{ matrix.arch }}" \
+            --out "dist/release/${{ matrix.os }}-${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/release/${{ matrix.os }}-${{ matrix.arch }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish verified release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/platforms
+          merge-multiple: false
+      - name: Build release manifest and stage platform archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          for release in dist/platforms/release-*/release.json; do
+            args+=(--artifact "${release}")
+          done
+          args+=(--require-platform linux/x86_64)
+          args+=(--require-platform linux/aarch64)
+          args+=(--require-platform macos/x86_64)
+          args+=(--require-platform macos/aarch64)
+          args+=(--require-platform windows/x86_64)
+          args+=(--require-platform windows/aarch64)
+          node generate-plugin-release-manifest.mjs --merge \
+            --version "${RELEASE_TAG#v}" \
+            --out dist/release \
+            --stage-artifacts \
+            "${args[@]}"
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" \
+              dist/release/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${RELEASE_TAG}" \
+              dist/release/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${PLUGIN_NAME} ${RELEASE_TAG}" \
+              --generate-notes
+          fi

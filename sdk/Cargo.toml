@@ -1,0 +1,51 @@
+# sdk 独立插件仓（自包含 SDK 快照）
+[workspace]
+resolver = "2"
+members = [
+  "plugin-proto",
+  "plugin-testkit",
+]
+
+[workspace.package]
+version = "3.0.1"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+hex = "0.4"
+parking_lot = "0.12"
+regex = "1"
+reqwest = { version = "0.13", features = ["json", "cookies"] }
+rhai = { version = "1", features = ["sync"] }
+schemars = "1.2"
+sea-orm = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.11"
+static_assertions = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+axagent-plugin-proto = { version = "3.0.1", path = "sdk/plugin-proto" }
+axagent-plugin-opc-core = { version = "3.0.1", path = "sdk/plugin-opc-core" }
+axagent-plugin-testkit = { version = "3.0.1", path = "sdk/plugin-testkit" }
+axagent-harness = { version = "3.0.1", path = "sdk/harness" }
+
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+incremental = false
+split-debuginfo = "unpacked"
+
+[profile.dev.build-override]
+opt-level = 0
+codegen-units = 16
+debug = false
+incremental = false
