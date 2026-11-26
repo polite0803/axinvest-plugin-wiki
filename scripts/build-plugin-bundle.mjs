@@ -15,6 +15,7 @@
  *   node scripts/build-plugin-bundle.mjs --plugin-version <版本> # 显式发布版本（声明式插件必需）
  *   node scripts/build-plugin-bundle.mjs --check         # 打包后真起一次 worker 做握手 + 停机回执
  *   node scripts/build-plugin-bundle.mjs --out <dir>     # 自定义输出目录
+ *   node scripts/build-plugin-bundle.mjs --build-root <dir> # 只切换 cargo 工作区（CI 临时构建根）
  *
  * 参数化口径（任务 #36 第 1 批）：**一个插件 = `PLUGIN_SPECS` 里一条**，条目的字段就是
  * 本脚本对插件的全部假设（cargo 包名、前端源目录、`ui.json` 源、清单构造器）。新增插件只加
@@ -40,8 +41,15 @@ const outFlag = argv.indexOf("--out");
 const pluginFlag = argv.indexOf("--plugin");
 const targetFlag = argv.indexOf("--target");
 const pluginVersionFlag = argv.indexOf("--plugin-version");
+const buildRootFlag = argv.indexOf("--build-root");
 const pluginName = pluginFlag >= 0 && argv[pluginFlag + 1] ? argv[pluginFlag + 1] : "stock";
 const targetTriple = targetFlag >= 0 && argv[targetFlag + 1] ? argv[targetFlag + 1] : null;
+// `--build-root` 只切换 cargo 的构建工作区，不切换前端/域包/清单的源码根。
+// 缺省构建根 = 该插件对应的独立 Git 仓（唯一权威源）；`--build-root` 保留给
+// 需要换 target 目录或跨机交叉编译的调用方，缺省路径不再回退主仓副本。
+const cargoCwd = buildRootFlag >= 0 && argv[buildRootFlag + 1]
+  ? path.resolve(argv[buildRootFlag + 1])
+  : requirePluginSourceRoot(pluginName);
 const requestedPluginVersion = pluginVersionFlag >= 0 && argv[pluginVersionFlag + 1]
   ? argv[pluginVersionFlag + 1]
   : null;
@@ -50,9 +58,9 @@ const requestedPluginVersion = pluginVersionFlag >= 0 && argv[pluginVersionFlag 
  * 插件规格表（键 = `--plugin` 取值）。
  *
  * - `packageName`：cargo 包名，同时决定 `cargo build -p` 与产物文件名（`<packageName>[.exe]`）；
- * - `webDir`：前端贡献源目录（相对 `axagent-plugins/`）；`null` = 无前端贡献 ⇒ 不拷资产、
- *   且清单不得声明 `pages[]`（`--check` 会拦）；
- * - `uiSchema`：`ui.json` 源（相对 `axagent-plugins/`）；`null` = 无详情槽声明；
+ * - `webDir`：前端贡献源目录（相对**插件源码根** —— 独立仓根，或打包器自带副本时的本仓根）；
+ *   `null` = 无前端贡献 ⇒ 不拷资产、且清单不得声明 `pages[]`（`--check` 会拦）；
+ * - `uiSchema`：`ui.json` 源（同上，相对插件源码根）；`null` = 无详情槽声明；
  * - `manifest(ctx)`：清单构造器，`ctx = { version, binaryName, sha256 }`。**键序即产物键序**
  *   （`JSON.stringify` 保序），改键序等于改产物，下游比对会当漂移。
  */
@@ -64,14 +72,13 @@ const PLUGIN_SPECS = {
     uiSchema: null,
     manifest: wikiManifest,
   },
-
 };
 
 
 // 清单命令的智能体面授权档位（`requiredPermission`，见 `PluginCommandManifest`）：
 // **未声明 = 只读档** ⇒ 写命令在智能体面按 `Safe` 暴露（`plugin_command_safety(None)`
 // 的测试锁定），用户确认弹窗形同虚设。写命令名单以宿主
-// `axagent-plugins/crates/plugins/src/worker.rs` 的
+// 宿主 `crates/plugins/src/worker.rs` 的
 // `required_permission_for(("opc.store", …)) => Write` 为准 —— **两处必须同批改**
 // （那边加一条写 op，这里就要加一条命令）。
 // ⚠ 删除类（delete_blog_post / delete_content_asset / delete_customer / delete_invoice）
@@ -155,36 +162,60 @@ const spec = PLUGIN_SPECS[pluginName];
 if (!spec) {
   fail(`未知插件 --plugin ${pluginName}（可选：${Object.keys(PLUGIN_SPECS).join(" | ")}）`);
 }
+
+/** 独立仓根（可用 `AXAGENT_PLUGIN_REPOS_ROOT` 覆盖）；主仓同级目录是默认落点。 */
+function pluginReposRoot() {
+  if (process.env.AXAGENT_PLUGIN_REPOS_ROOT) { return path.resolve(process.env.AXAGENT_PLUGIN_REPOS_ROOT); }
+  // `workspaceRoot` 是 `axagent-plugins/`，独立仓与**主仓**同级 ⇒ 上跳两层。
+  return path.resolve(workspaceRoot, "..", "..", "AxInvest-plugin-repos");
+}
+
+/**
+ * 插件源码根：**独立仓是唯一权威**，主仓 `crates/plugin-*` 副本不参与打包。
+ * 两种落点：
+ *   ① 主仓 `axagent-plugins/scripts/` ⇒ `<reposRoot>/<plugin>`；
+ *   ② 独立仓自带副本 `scripts/` ⇒ 本仓根（仓内已有 `plugin-<plugin>/`）。
+ * 都不成立时返回 null，由调用方 fail-closed —— 绝不回退主仓副本。
+ */
+function resolvePluginSourceRoot(name) {
+  const candidate = path.join(pluginReposRoot(), name);
+  if (fs.existsSync(path.join(candidate, ".git"))) { return candidate; }
+  if (fs.existsSync(path.join(workspaceRoot, `plugin-${name}`))) { return workspaceRoot; }
+  return null;
+}
+
+function requirePluginSourceRoot(name) {
+  const root = resolvePluginSourceRoot(name);
+  if (!root) {
+    fail(
+      `插件源码根不可用：找不到独立仓 ${path.join(pluginReposRoot(), name)}`
+        + "（独立仓是唯一权威，不退回主仓副本；可用 AXAGENT_PLUGIN_REPOS_ROOT 指定根）",
+    );
+  }
+  return root;
+}
+
 const outRoot = path.resolve(
   outFlag >= 0 && argv[outFlag + 1] ? argv[outFlag + 1] : path.join(workspaceRoot, "dist", "plugins", pluginName),
 );
-// 与宿主 `PANEL_ASSET_ALLOWED_EXTS`（axagent-plugins/crates/plugins/src/manager.rs）同口径：
+// 与宿主 `PANEL_ASSET_ALLOWED_EXTS`（宿主 crates/plugins/src/manager.rs）同口径：
 // 清单校验会拒掉白名单外的扩展名，产物自检必须在**打包期**就报出来，而不是等安装时才失败。
 const PAGE_ASSET_ALLOWED_EXTS = new Set(["html", "htm", "js", "css"]);
 const PAGE_ENTRY = "pages/index.html";
-const webRoot = spec.webDir ? path.join(workspaceRoot, spec.webDir) : null;
-const uiSchemaSource = spec.uiSchema ? path.join(workspaceRoot, spec.uiSchema) : null;
+const webRoot = spec.webDir ? path.join(requirePluginSourceRoot(pluginName), spec.webDir) : null;
+const uiSchemaSource = spec.uiSchema ? path.join(requirePluginSourceRoot(pluginName), spec.uiSchema) : null;
 const registryPath = path.join(workspaceRoot, "scripts", "opc-domain-pack-plugins.json");
 const ownershipRegistry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
 const domainPackSourceByPlugin = Object.fromEntries(
   ownershipRegistry.packs
     .filter((p) => p.pluginId !== "plugin-opc")
-    .map((p) => [p.pluginId.replace(/^plugin-/, ""), path.join(workspaceRoot, "crates", p.pluginId, "domain_packs")]),
+    .map((p) => {
+      const owner = p.pluginId.replace(/^plugin-/, "");
+      // 全局命令归属自检要读**每个**域插件的 logical manifest；源码权威都在独立仓，
+      // 缺任一仓即 fail-closed（不退回主仓副本，也不静默跳过 —— 那会漏掉跨插件重名）。
+      return [owner, path.join(requirePluginSourceRoot(owner), p.pluginId, "domain_packs")];
+    }),
 );
-// 独立仓没有 crates/ 布局：直接按仓根布局重建映射，不用字符串替换。
-// 原 .replace(`/crates/...`) 只在 POSIX 上命中；Windows 的 path.join 产出反斜杠，
-// 替换失败会让 Release 的 Windows job 仍读 crates/ 路径并以 ENOENT 失败。
-for (const packKey of Object.keys(domainPackSourceByPlugin)) {
-  domainPackSourceByPlugin[packKey] = path.join(
-    workspaceRoot, "plugin-" + pluginName, "domain_packs",
-  );
-}
-// 独立单插件仓没有其它插件的域包源码；owner 冲突检查只读本仓随包资产。
-for (const key of Object.keys(domainPackSourceByPlugin)) {
-  if (key !== pluginName) delete domainPackSourceByPlugin[key];
-}
-// 必须在映射重写之后再取 domainPackSource：旧版在重写前取值会留下 crates/ 路径，
-// Windows Release --check 实测报「域包清单目录不存在：...\crates\plugin-opc-accounting\domain_packs」。
 const domainPackSource = domainPackSourceByPlugin[pluginName] ?? null;
 const ownedDomainPackIds = new Set(
   (ownershipRegistry.policy?.verticalSlices ?? [])
@@ -197,8 +228,10 @@ const expectedDomainPackIds = pluginName === "opc"
     .filter((p) => p.pluginId === `plugin-${pluginName}` && ownedDomainPackIds.has(p.id))
     .map((p) => p.id);
 const DOMAIN_PACK_DIR = "domain_packs";
-const declarativeDomainPackId = ownershipRegistry.policy?.verticalSlices?.find(
-  (slice) => slice.pluginId === `plugin-${pluginName}` && slice.manifestStrategy === "declarative-only",
+// 所有 OPC 域（声明式与 worker）都带静态展示区，页面自检不再按 manifestStrategy 分流；
+// 是否额外要求 bundle.js，由本插件 PLUGIN_SPECS.commands 是否非空决定。
+const opcDomainPackIdForPage = ownershipRegistry.policy?.verticalSlices?.find(
+  (slice) => slice.pluginId === `plugin-${pluginName}`,
 )?.domainPackId ?? null;
 
 /** 各插件 logical manifest 的合法 owner：由底册 verticalSlices 唯一权威。 */
@@ -226,6 +259,9 @@ let sha256 = null;
 let binaryName = null;
 let workerVersion = "1.0.0";
 if (spec.packageName) {
+  if (!fs.existsSync(path.join(cargoCwd, "Cargo.toml"))) {
+    fail(`cargo 构建根缺少 Cargo.toml（--build-root）：${cargoCwd}`);
+  }
   run(
     "cargo",
     [
@@ -235,13 +271,13 @@ if (spec.packageName) {
       ...(release ? ["--release"] : []),
       ...(targetTriple ? ["--target", targetTriple] : []),
     ],
-    { cwd: workspaceRoot },
+    { cwd: cargoCwd },
   );
 
   // 2) 从 cargo 自己的视角取 target 目录与版本号 —— 不猜 `target/` 的位置
   //    （本机把 CARGO_TARGET_DIR 指到了 `~/.cargo/target-axagent`）。
   const metadataRaw = spawnSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
-    cwd: workspaceRoot,
+    cwd: cargoCwd,
     encoding: "utf8",
     windowsHide: true,
   });
@@ -270,6 +306,20 @@ if (spec.packageName) {
   fs.mkdirSync(binDir, { recursive: true });
   const stagedBinary = path.join(binDir, binaryName);
   fs.copyFileSync(builtBinary, stagedBinary);
+  if (release) {
+    // 包体闸门：带 debug_info 的 worker 一个就有 6-7M，17 个把安装包从 80M 抬到 156M。
+    // `file` 在部分 Windows 环境不存在，此时只提示不拦包（strip 已由 Cargo profile 保证）。
+    const probe = spawnSync("file", [stagedBinary], { encoding: "utf8", windowsHide: true });
+    if (probe.error || probe.status !== 0) {
+      console.warn(
+        `[bundle] 无法用 file 校验 ${binaryName} 的调试符号（跳过）：${probe.error ?? probe.stderr?.trim()}`,
+      );
+    } else if (/debug_info/.test(probe.stdout)) {
+      fail(`${binaryName} 仍带 debug_info；请检查发起构建的 workspace 根的 [profile.release] strip 设置`);
+    }
+    const sizeMiB = (fs.statSync(stagedBinary).size / 1024 / 1024).toFixed(1);
+    console.log(`[bundle] worker ${binaryName}: ${sizeMiB} MiB（release / stripped）`);
+  }
   sha256 = createHash("sha256").update(fs.readFileSync(stagedBinary)).digest("hex");
 } else if (requestedPluginVersion) {
   workerVersion = requestedPluginVersion;
@@ -371,7 +421,14 @@ if (check) {
  * worker 命令页退回占位文案时，CI 会红而不是静默绿。
  */
 function checkPageVerifierIfPresent() {
-  const verifier = path.join(workspaceRoot, spec.webDir ?? "", "..", "src-web", "__verify__", "verify-bundle.mjs");
+  const verifier = path.join(
+    requirePluginSourceRoot(pluginName),
+    spec.webDir ?? "",
+    "..",
+    "src-web",
+    "__verify__",
+    "verify-bundle.mjs",
+  );
   if (!spec.webDir || !fs.existsSync(verifier)) {
     return;
   }
@@ -394,8 +451,8 @@ async function checkStagedBundle(declared, root) {
   } else if ((declared.pages ?? []).length > 0) {
     fail("--check：本插件未声明前端源（webDir=null），清单不得声明 pages[]");
   }
-  if (declarativeDomainPackId) {
-    checkDeclarativePage(root, declarativeDomainPackId);
+  if (opcDomainPackIdForPage) {
+    checkOpcDomainPage(root, opcDomainPackIdForPage, Array.isArray(spec.commands) && spec.commands.length > 0);
   }
   checkDeclaredTaskSources(declared, root);
   if (domainPackSource) { checkDeclaredDomainPacks(root); }
@@ -534,20 +591,37 @@ function checkDeclaredPages(declared, root) {
   console.log(`[plugin-bundle] --check ✅ ${bundlePages} 个 bundle 页的 entry 均存在且在白名单内`);
 }
 
-/** 声明式域包页面的安装产物自检：只读随包静态数据，不依赖主机源码树。 */
-function checkDeclarativePage(root, expectedId) {
+/**
+ * OPC 域包页面的安装产物自检：worker 域必查 bundle.js；
+ * 静态数据区只查 `index.html` 确实声明加载 domain-data.js 的域 ——
+ * accounting / sales-growth / content-media 三个老 worker 域从未有静态区，
+ * 与 `generate-declarative-opc-pages.mjs` 的 pageAssets 口径保持一致。
+ */
+function checkOpcDomainPage(root, expectedId, withWorkerBundle) {
   const pageDir = path.join(root, "pages");
   const pagePath = path.join(pageDir, "index.html");
   const dataPath = path.join(pageDir, "domain-data.js");
-  if (!fs.existsSync(pagePath) || !fs.existsSync(dataPath)) {
-    fail(`--check：声明式页面产物缺失：${pageDir}`);
+  if (!fs.existsSync(pagePath)) {
+    fail(`--check：域包页面产物缺失：${pageDir}`);
   }
   const html = fs.readFileSync(pagePath, "utf8");
-  if (!html.includes('src="./domain-data.js"')) {
-    fail("--check：声明式页面没有加载 domain-data.js");
+  const withStaticData = html.includes('src="./domain-data.js"');
+  if (withStaticData && !fs.existsSync(dataPath)) {
+    fail(`--check：域包页面声明了 domain-data.js 但产物缺失：${dataPath}`);
+  }
+  if (withWorkerBundle) {
+    const bundlePath = path.join(pageDir, "bundle.js");
+    if (!fs.existsSync(bundlePath)) { fail("--check：worker 域页面缺少 bundle.js"); }
+    if (!html.includes('src="./bundle.js"')) {
+      fail("--check：worker 域页面没有加载 bundle.js");
+    }
+  }
+  if (!withStaticData) {
+    console.log(`[plugin-bundle] --check ✅ 域包页面无静态数据区（${expectedId}：仅 bundle 交互）`);
+    return;
   }
   for (const selector of ["#capabilities", "#kpis", "#workflow-steps", "#data-sources", "#acceptance"]) {
-    if (!html.includes(selector)) { fail(`--check：声明式页面缺少渲染区 ${selector}`); }
+    if (!html.includes(selector)) { fail(`--check：域包页面缺少渲染区 ${selector}`); }
   }
   const raw = fs.readFileSync(dataPath, "utf8");
   const match = /^globalThis\.AX_OPC_DOMAIN_DATA\s*=\s*([\s\S]*);\s*$/.exec(raw);
@@ -564,10 +638,10 @@ function checkDeclarativePage(root, expectedId) {
     fail(`--check：domain-data.js id=${parsed.id}，期望 ${expectedId}`);
   }
   if (!Array.isArray(parsed.capabilities) || parsed.capabilities.length === 0) {
-    fail("--check：声明式域包至少需要展示一条 capability");
+    fail("--check：域包至少需要展示一条 capability");
   }
   console.log(
-    `[plugin-bundle] --check ✅ 声明式页面数据完整（${parsed.id}：${parsed.capabilities.length} 能力 / ${parsed.kpis.length} KPI / ${parsed.workflowSteps.length} 步骤）`,
+    `[plugin-bundle] --check ✅ 域包页面数据完整（${parsed.id}：${parsed.capabilities.length} 能力 / ${parsed.kpis.length} KPI / ${parsed.workflowSteps.length} 步骤）`,
   );
 }
 
@@ -719,7 +793,17 @@ function stockManifest({ version, binaryName, sha256 }) {
     // 前端页面声明：`entry` 相对安装目录（扩展名走宿主资产白名单），宿主
     // `PluginManager::resolve_page_asset` 把它解析成安装根内的绝对路径；
     // 前端只传 `(pluginId, pageId)`，不得自己拼路径。
-    pages: [{ id: "stock-home", title: "股票", entry: PAGE_ENTRY, loading: "bundle" }],
+    // 导航元数据（navGroup/labelKey/icon/navOrder）是宿主侧栏唯一声明面：宿主只投影不写死。
+    pages: [{
+      id: "stock-home",
+      title: "股票",
+      entry: PAGE_ENTRY,
+      loading: "bundle",
+      navGroup: "invest",
+      labelKey: "nav.stockAnalysis",
+      icon: "ChartBar",
+      navOrder: 0,
+    }],
     // `command` 用 `worker://<名>` 占位：worker 通道不读它（按 `name` 发帧），但若意外
     // 退回 spawn 通道，这个不存在的程序名会当场失败而不是静默跑别的东西。
     commands: [
@@ -1067,6 +1151,29 @@ function stockManifest({ version, binaryName, sha256 }) {
             },
           },
           required: ["vendor", "status"],
+        },
+      },
+      {
+        // 主行情源设置 —— 原宿主命令 `stock_set_market_data_primary_vendor` 的业务体
+        // 收进股票插件；写 settings + 即时重排 quote/klines 链首（等阶 workspace-write）。
+        name: "stock_set_market_data_primary_vendor",
+        description: "设置主行情源并即时重排 quote/klines 链首（经宿主 stock.analysis 接缝；传 vendor=null 清除覆盖）",
+        command: "worker://stock_set_market_data_primary_vendor",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            vendor: {
+              type: ["string", "null"],
+              description: "主行情源标识；null / 空串清除覆盖，恢复默认优先级",
+            },
+            applyFromSettings: {
+              type: "boolean",
+              description: "只读 settings 并应用（装配/重放已保存的主源），不写库",
+            },
+          },
+          required: [],
         },
       },
       {
@@ -1804,6 +1911,270 @@ function stockManifest({ version, binaryName, sha256 }) {
           properties: {
             asOfDate: { type: "string", description: "时间旅行截止日；省略 = live 叠加实时持仓" },
           },
+        },
+      },
+      // ── G2 模拟组合九条：宿主 `paper_portfolio_*` Tauri 命令退役后的同名插件命令 ──
+      // 字段形状与入参必填口径逐字对齐 analysis-engine 的三个 Input DTO（camelCase）；
+      // 业务体走宿主 `stock.analysis` 接缝，插件侧不重写组合/持仓算法。
+      {
+        name: "paper_portfolio_create",
+        description: "创建模拟组合（经宿主 stock.analysis 接缝）",
+        command: "worker://paper_portfolio_create",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            name: { type: "string", description: "组合名称" },
+            sourceEvent: { type: "string", description: "来源事件描述" },
+            sourceNewsId: { type: ["string", "null"], description: "关联新闻 id" },
+            sourceScreenshotDiagnosisId: { type: ["string", "null"], description: "关联截图诊断 id" },
+          },
+          required: ["name", "sourceEvent"],
+        },
+      },
+      {
+        name: "paper_portfolio_list",
+        description: "列出模拟组合（经宿主 stock.analysis 接缝）",
+        command: "worker://paper_portfolio_list",
+        requiredPermission: "read-only",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            status: { type: ["string", "null"], description: "状态过滤；省略/null = 全部" },
+          },
+        },
+      },
+      {
+        name: "paper_portfolio_get",
+        description: "获取组合详情（含持仓 + 实时盈亏，经宿主 stock.analysis 接缝）",
+        command: "worker://paper_portfolio_get",
+        requiredPermission: "read-only",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            portfolioId: { type: "string", description: "组合 id" },
+          },
+          required: ["portfolioId"],
+        },
+      },
+      {
+        name: "paper_portfolio_close",
+        description: "关闭模拟组合（经宿主 stock.analysis 接缝）",
+        command: "worker://paper_portfolio_close",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            portfolioId: { type: "string", description: "组合 id" },
+          },
+          required: ["portfolioId"],
+        },
+      },
+      {
+        name: "paper_portfolio_archive",
+        description: "归档模拟组合（经宿主 stock.analysis 接缝）",
+        command: "worker://paper_portfolio_archive",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            portfolioId: { type: "string", description: "组合 id" },
+          },
+          required: ["portfolioId"],
+        },
+      },
+      {
+        name: "paper_portfolio_add_position",
+        description: "添加虚拟持仓（经宿主 stock.analysis 接缝）",
+        command: "worker://paper_portfolio_add_position",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            portfolioId: { type: "string", description: "组合 id" },
+            symbol: { type: "string", description: "标的代码" },
+            market: { type: "string", description: "市场 A / US / HK / ETF；缺省 A" },
+            entryPrice: { type: "number", description: "开仓价" },
+            entryDate: { type: "string", description: "开仓日 YYYY-MM-DD" },
+            quantity: { type: "number", description: "数量" },
+            note: { type: ["string", "null"], description: "备注" },
+          },
+          required: ["portfolioId", "symbol", "entryPrice", "entryDate", "quantity"],
+        },
+      },
+      {
+        name: "paper_portfolio_close_position",
+        description: "平仓单只持仓（经宿主 stock.analysis 接缝）",
+        command: "worker://paper_portfolio_close_position",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            positionId: { type: "string", description: "持仓 id" },
+            exitPrice: { type: "number", description: "平仓价（必须为正）" },
+            exitDate: { type: "string", description: "平仓日 YYYY-MM-DD" },
+          },
+          required: ["positionId", "exitPrice", "exitDate"],
+        },
+      },
+      {
+        name: "paper_portfolio_close_all_positions",
+        description: "批量平仓所有 open 持仓（经宿主 stock.analysis 接缝）",
+        command: "worker://paper_portfolio_close_all_positions",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            portfolioId: { type: "string", description: "组合 id" },
+            exitPrice: { type: "number", description: "统一平仓价（必须为正）" },
+            exitDate: { type: "string", description: "统一平仓日 YYYY-MM-DD" },
+          },
+          required: ["portfolioId", "exitPrice", "exitDate"],
+        },
+      },
+      {
+        name: "paper_portfolio_list_active_details",
+        description: "列出所有 active 组合详情（经宿主 stock.analysis 接缝）",
+        command: "worker://paper_portfolio_list_active_details",
+        requiredPermission: "read-only",
+        inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      },
+      // ── G6 截图诊断八条：宿主 `screenshot_diagnosis_*` Tauri 命令退役后的同名插件命令 ──
+      // 入参逐字对齐 analysis-engine DTO（camelCase）；业务体走宿主 `stock.analysis` 接缝，
+      // 插件侧不复制 VLM / LLM / 风险诊断算法。
+      {
+        name: "screenshot_diagnosis_create_from_image",
+        description: "上传截图自动诊断（OCR + 结构化 + 风险诊断，经宿主 stock.analysis 接缝）",
+        command: "worker://screenshot_diagnosis_create_from_image",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            imageBase64: { type: "string", description: "截图 base64（可带 data:image 前缀）" },
+            sourceApp: { type: ["string", "null"], description: "截图来源 App" },
+            providerId: { type: "string", description: "视觉模型 provider id" },
+            modelId: { type: "string", description: "视觉模型 model id" },
+          },
+          required: ["imageBase64", "providerId", "modelId"],
+        },
+      },
+      {
+        name: "screenshot_diagnosis_create",
+        description: "直接传入 positions 创建截图诊断（经宿主 stock.analysis 接缝）",
+        command: "worker://screenshot_diagnosis_create",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            imageHash: { type: ["string", "null"], description: "截图 SHA256（去重）" },
+            imagePath: { type: ["string", "null"], description: "截图本地路径" },
+            imageThumbnailBase64: { type: ["string", "null"], description: "缩略图 base64" },
+            imageWidth: { type: ["integer", "null"], description: "原图宽度" },
+            imageHeight: { type: ["integer", "null"], description: "原图高度" },
+            sourceApp: { type: ["string", "null"], description: "截图来源 App" },
+            ocrText: { type: ["string", "null"], description: "OCR 全文" },
+            positions: { type: "array", items: { type: "object" }, description: "结构化持仓数组" },
+            totalMarketValue: { type: "number", description: "总市值；0 = 由 positions 求和" },
+            diagnosis: { type: ["object", "null"], description: "风险诊断 schema" },
+            narrative: { type: "string", description: "中文诊断说明" },
+            recommendedActions: { type: "array", items: { type: "string" }, description: "建议动作" },
+            sourceWorkflowExecutionId: { type: ["string", "null"], description: "来源工作流执行 id" },
+            providerId: { type: ["string", "null"], description: "provider id" },
+            modelId: { type: ["string", "null"], description: "model id" },
+            status: { type: "string", description: "初始状态，默认 active" },
+          },
+          required: ["positions"],
+        },
+      },
+      {
+        name: "screenshot_diagnosis_get",
+        description: "按 ID 获取截图诊断（经宿主 stock.analysis 接缝）",
+        command: "worker://screenshot_diagnosis_get",
+        requiredPermission: "read-only",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: { diagnosisId: { type: "string", description: "诊断 id" } },
+          required: ["diagnosisId"],
+        },
+      },
+      {
+        name: "screenshot_diagnosis_list_recent",
+        description: "列出最近 N 条截图诊断（经宿主 stock.analysis 接缝）",
+        command: "worker://screenshot_diagnosis_list_recent",
+        requiredPermission: "read-only",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: { limit: { type: ["integer", "null"], description: "条数，默认 20" } },
+        },
+      },
+      {
+        name: "screenshot_diagnosis_list_by_status",
+        description: "按状态过滤截图诊断（经宿主 stock.analysis 接缝）",
+        command: "worker://screenshot_diagnosis_list_by_status",
+        requiredPermission: "read-only",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: { status: { type: "string", description: "active / archived / failed" } },
+          required: ["status"],
+        },
+      },
+      {
+        name: "screenshot_diagnosis_archive",
+        description: "归档截图诊断（经宿主 stock.analysis 接缝）",
+        command: "worker://screenshot_diagnosis_archive",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: { diagnosisId: { type: "string", description: "诊断 id" } },
+          required: ["diagnosisId"],
+        },
+      },
+      {
+        name: "screenshot_diagnosis_update",
+        description: "更新截图诊断字段（经宿主 stock.analysis 接缝）",
+        command: "worker://screenshot_diagnosis_update",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            diagnosisId: { type: "string", description: "诊断 id" },
+            status: { type: ["string", "null"], description: "新状态" },
+            narrative: { type: ["string", "null"], description: "新诊断说明" },
+            recommendedActions: { type: ["array", "null"], items: { type: "string" }, description: "新建议动作" },
+            errorMessage: { type: ["string", "null"], description: "失败原因" },
+          },
+          required: ["diagnosisId"],
+        },
+      },
+      {
+        name: "screenshot_diagnosis_to_paper_portfolio",
+        description: "截图诊断一键转模拟观察组合（经宿主 stock.analysis 接缝）",
+        command: "worker://screenshot_diagnosis_to_paper_portfolio",
+        requiredPermission: "workspace-write",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            diagnosisId: { type: "string", description: "诊断 id" },
+            name: { type: "string", description: "组合名称" },
+            sourceEvent: { type: "string", description: "来源事件描述" },
+          },
+          required: ["diagnosisId", "name", "sourceEvent"],
         },
       },
       {
@@ -3650,9 +4021,12 @@ function withRequiredPermission(commands) {
 }
 
 function opcManifest({ version, binaryName, sha256 }) {
-  const domainPackManifests = (fs.existsSync(path.join(workspaceRoot, "plugin-opc", "domain_packs"))
-      ? fs.readdirSync(path.join(workspaceRoot, "plugin-opc", "domain_packs"))
-      : [])
+  // opc 自身已不拥有任何域包（14 份全部分给各域插件），该目录在 Git 中为空 ⇒
+  // 干净 checkout 里根本不存在。无条件 readdirSync 会让 Release 的 beforeBuildCommand
+  // 以 ENOENT 失败（2026-11-22 实测 6 个桌面 target 全红）；目录不存在等价于零份域包。
+  const opcSourceRoot = resolvePluginSourceRoot("opc");
+  const opcDomainPackDir = opcSourceRoot ? path.join(opcSourceRoot, "plugin-opc", "domain_packs") : null;
+  const domainPackManifests = (fs.existsSync(opcDomainPackDir) ? fs.readdirSync(opcDomainPackDir) : [])
     .filter((f) => f.endsWith(".json"))
     .sort()
     .map((f) => path.posix.join(DOMAIN_PACK_DIR, f));
@@ -3676,7 +4050,14 @@ function opcManifest({ version, binaryName, sha256 }) {
     // 前端页面声明（#301）：语义与 stock 段上方四行注释逐字相同（entry 相对安装目录、
     // 宿主 resolve_page_asset 解析、前端只传 (pluginId, pageId)）。键序同 stock：pages
     // 插在 worker 与 commands 之间。
-    pages: [{ id: "opc-home", title: "OPC", entry: PAGE_ENTRY, loading: "bundle" }],
+    // 通道探针页：只验证装载通道，不是真实 UI；隐藏侧栏入口（路由仍注册，可直达调试）。
+    pages: [{
+      id: "opc-home",
+      title: "OPC",
+      entry: PAGE_ENTRY,
+      loading: "bundle",
+      hidden: true,
+    }],
     // P6.2：一域一 logical manifest；宿主只读投影，不在此复制 worker/命令实现。
     domainPacks: domainPackManifests,
     // `command` 用 `worker://<名>` 占位（同 stock）：worker 通道不读它，但按名发帧的
@@ -5150,7 +5531,16 @@ function opcAccountingManifest({ version, binaryName, sha256 }) {
     agents: [],
     defaultEnabled: true,
     worker: { program: path.posix.join("bin", binaryName) },
-    pages: [{ id: "opc-accounting", title: "会计", entry: PAGE_ENTRY, loading: "bundle" }],
+    pages: [{
+      id: "opc-accounting",
+      title: "会计",
+      entry: PAGE_ENTRY,
+      loading: "bundle",
+      navGroup: "packs",
+      labelKey: "nav.financeAccounting",
+      icon: "Calculator",
+      navOrder: 1,
+    }],
     domainPacks: [path.posix.join(DOMAIN_PACK_DIR, "accounting.json")],
     commands: [
       {
@@ -5220,6 +5610,151 @@ function opcAccountingManifest({ version, binaryName, sha256 }) {
   };
 }
 
+/**
+ * 通用域 worker 清单工厂（统一插件规范的唯一形态）。
+ *
+ * 只从插件名 / 标题 / 域包 id / 命令名列表派生清单，命令实现留在 Rust worker 内：
+ * `PLUGIN_SPECS[name].commands` 是命令面的唯一登记处，契约 checker 会逐项对账。
+ * 工具入参 schema 按命令后缀匹配四种通用形状（`web_search` / `file_read` /
+ * `file_write` / `run_automation_rules`），不为每个域另写一份 —— 11 域共用同一份
+ * 工具实现，schema 也必须同源。
+ */
+/**
+ * OPC 域包页面的侧栏元数据（唯一声明面）。
+ *
+ * ⚠ 这里的 navGroup / labelKey / icon / navOrder 是宿主侧栏投影的权威来源；
+ * 前端 Sidebar / CommandPalette 只做渲染，不得再按插件名写死分组或图标（禁区 12）。
+ * labelKey 复用既有 `nav.*`（11 语言已齐），不新增文案。
+ *
+ * 映射来源：git 7b43b5f92^:src/pages/opc/routes.tsx（14 个行业包的编译期声明被删前的原形），
+ * 加上 opc-accounting（会计，独立清单工厂）与 opc 公共包（探针页，hidden）。
+ */
+const OPC_DOMAIN_PAGE_NAV = {
+  "opc-finance-invest":     { navGroup: "packs", labelKey: "nav.financeAnalysis",      icon: "TrendingUp",    navOrder: 0 },
+  "opc-accounting":         { navGroup: "packs", labelKey: "nav.financeAccounting",    icon: "Calculator",    navOrder: 1 },
+  "opc-sales-growth":       { navGroup: "packs", labelKey: "nav.automationSales",      icon: "TrendingUp",    navOrder: 2 },
+  "opc-project-management": { navGroup: "packs", labelKey: "nav.automationProjects",   icon: "Layers",        navOrder: 3 },
+  "opc-consulting":         { navGroup: "packs", labelKey: "nav.automationConsulting", icon: "Users",         navOrder: 4 },
+  "opc-ecommerce":          { navGroup: "packs", labelKey: "nav.automationEcommerce",  icon: "ShoppingBag",   navOrder: 5 },
+  "opc-software-dev":       { navGroup: "packs", labelKey: "nav.devopsSoftware",       icon: "Code",          navOrder: 6 },
+  "opc-security":           { navGroup: "packs", labelKey: "nav.devopsSecurity",       icon: "ShieldCheck",   navOrder: 7 },
+  "opc-geospatial":         { navGroup: "packs", labelKey: "nav.dataGeospatial",       icon: "MapPin",        navOrder: 8 },
+  "opc-ai-research":        { navGroup: "packs", labelKey: "nav.dataAiResearch",       icon: "Brain",         navOrder: 9 },
+  "opc-content-media":      { navGroup: "packs", labelKey: "nav.contentMedia",         icon: "Video",         navOrder: 10 },
+  "opc-design":             { navGroup: "packs", labelKey: "nav.contentDesign",        icon: "Palette",       navOrder: 11 },
+  "opc-education":          { navGroup: "packs", labelKey: "nav.contentEducation",     icon: "GraduationCap", navOrder: 12 },
+  "opc-game-dev":           { navGroup: "packs", labelKey: "nav.aiMediaGame",          icon: "Gamepad2",      navOrder: 13 },
+};
+
+function opcDomainPageDecl(name, title) {
+  const nav = OPC_DOMAIN_PAGE_NAV[name];
+  const base = { id: name, title, entry: PAGE_ENTRY, loading: "bundle" };
+  return nav ? { ...base, ...nav } : base;
+}
+
+function opcWorkerDomainManifest(name, title, pack) {
+  return ({ version, binaryName, sha256 }) => {
+    const commands = (PLUGIN_SPECS[name]?.commands ?? []).map((commandName) => {
+      const description = `OPC ${title}域包命令：${commandName}`;
+      if (commandName.endsWith("_web_search")) {
+        return {
+          name: commandName,
+          description,
+          command: `worker://${commandName}`,
+          requiredPermission: "read-only",
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string", description: "搜索关键词" } },
+            required: ["query"],
+          },
+        };
+      }
+      if (commandName.endsWith("_file_read")) {
+        return {
+          name: commandName,
+          description,
+          command: `worker://${commandName}`,
+          requiredPermission: "read-only",
+          inputSchema: {
+            type: "object",
+            properties: { path: { type: "string", description: "工作区相对路径" } },
+            required: ["path"],
+          },
+        };
+      }
+      if (commandName.endsWith("_file_write")) {
+        return {
+          name: commandName,
+          description,
+          command: `worker://${commandName}`,
+          requiredPermission: "workspace-write",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "工作区相对路径" },
+              content: { type: "string", description: "写入内容" },
+            },
+            required: ["path", "content"],
+          },
+        };
+      }
+      if (commandName.endsWith("_run_automation_rules")) {
+        return {
+          name: commandName,
+          description,
+          command: `worker://${commandName}`,
+          requiredPermission: "workspace-write",
+          inputSchema: {
+            type: "object",
+            properties: {
+              // `capabilityPackId` 由 worker 按自身身份固定注入，不暴露给调用方越域。
+              entityType: { type: "string", description: "实体类型" },
+              entityId: { type: "string", description: "实体 id" },
+              status: { type: "string", description: "实体状态过滤" },
+              overdueDays: { type: "number", description: "逾期天数阈值" },
+              createdDays: { type: "number", description: "创建天数阈值" },
+              fields: { type: "object", description: "规则匹配字段" },
+            },
+            required: ["entityType", "entityId"],
+          },
+        };
+      }
+      // 其余工具命令（OpcSearchWiki / OpcCreateProject 等）的真实入参 schema 在宿主工具里，
+      // 清单只声明「对象」这一形状；worker 不做字段级校验，避免复制宿主 schema 造成双权威。
+      // 权限按命令语义保守取值：List/Search/Get/Validate 是读，其余按写处理（含 Bash / FileWrite）。
+      // 实体批量校验走 opc.store 的读 op（只校验不落库），不能因命令名不含读取动词而误标写权限。
+      const readTool = /_(?:list|search|get|read|find|query|batch_validate)_/.test(commandName);
+      return {
+        name: commandName,
+        description,
+        command: `worker://${commandName}`,
+        requiredPermission: readTool ? "read-only" : "workspace-write",
+        inputSchema: {
+          type: "object",
+          description: "参数由宿主工具校验；worker 只检查对象形状并逐字转发",
+        },
+      };
+    });
+    return {
+      name,
+      version,
+      description: `OPC ${title}域包：域专属 worker（命令经宿主接缝复用工具实现）`,
+      // 与既有域 worker 同档：`subprocess_execution` 是宿主启动命令 shell hook 的硬要求，
+      // `write` 同时满足 opc.store 写 op 与 tool.set 写工具闸（FileWrite / Bash）。
+      permissions: ["subprocess_execution", "write"],
+      mcp_servers: [],
+      skills: [],
+      agents: [],
+      defaultEnabled: true,
+      worker: { program: path.posix.join("bin", binaryName) },
+      pages: [opcDomainPageDecl(name, title)],
+      domainPacks: [path.posix.join(DOMAIN_PACK_DIR, `${pack}.json`)],
+      commands,
+      integrity: { algorithm: "sha256", hash: sha256 },
+    };
+  };
+}
+
 /** 通用声明式域包清单工厂：只贡献页面 + logical manifest，不声明 worker / 命令。 */
 function declarativeOpcManifest(name, title, pack) {
   return () => ({
@@ -5231,7 +5766,7 @@ function declarativeOpcManifest(name, title, pack) {
     skills: [],
     agents: [],
     defaultEnabled: true,
-    pages: [{ id: name, title, entry: PAGE_ENTRY, loading: "bundle" }],
+    pages: [opcDomainPageDecl(name, title)],
     domainPacks: [path.posix.join(DOMAIN_PACK_DIR, `${pack}.json`)],
     commands: [],
   });
@@ -5248,7 +5783,16 @@ function opcSecurityManifest({ version }) {
     skills: [],
     agents: [],
     defaultEnabled: true,
-    pages: [{ id: "opc-security", title: "安全合规", entry: PAGE_ENTRY, loading: "bundle" }],
+    pages: [{
+      id: "opc-security",
+      title: "安全合规",
+      entry: PAGE_ENTRY,
+      loading: "bundle",
+      navGroup: "packs",
+      labelKey: "nav.devopsSecurity",
+      icon: "ShieldCheck",
+      navOrder: 7,
+    }],
     domainPacks: [path.posix.join(DOMAIN_PACK_DIR, "security.json")],
     commands: [],
   };
@@ -5266,7 +5810,16 @@ function opcSalesGrowthManifest({ version, binaryName, sha256 }) {
     agents: [],
     defaultEnabled: true,
     worker: { program: path.posix.join("bin", binaryName) },
-    pages: [{ id: "opc-sales-growth", title: "销售增长", entry: PAGE_ENTRY, loading: "bundle" }],
+    pages: [{
+      id: "opc-sales-growth",
+      title: "销售增长",
+      entry: PAGE_ENTRY,
+      loading: "bundle",
+      navGroup: "packs",
+      labelKey: "nav.automationSales",
+      icon: "TrendingUp",
+      navOrder: 2,
+    }],
     domainPacks: [path.posix.join(DOMAIN_PACK_DIR, "sales_growth.json")],
     commands: [
       {
@@ -5346,7 +5899,16 @@ function opcContentMediaManifest({ version, binaryName, sha256 }) {
     agents: [],
     defaultEnabled: true,
     worker: { program: path.posix.join("bin", binaryName) },
-    pages: [{ id: "opc-content-media", title: "内容媒体", entry: PAGE_ENTRY, loading: "bundle" }],
+    pages: [{
+      id: "opc-content-media",
+      title: "内容媒体",
+      entry: PAGE_ENTRY,
+      loading: "bundle",
+      navGroup: "packs",
+      labelKey: "nav.contentMedia",
+      icon: "Video",
+      navOrder: 10,
+    }],
     domainPacks: [path.posix.join(DOMAIN_PACK_DIR, "content_media.json")],
     commands: names.map((name) => ({
       name,

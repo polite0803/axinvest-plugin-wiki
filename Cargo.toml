@@ -48,3 +48,12 @@ opt-level = 0
 codegen-units = 16
 debug = false
 incremental = false
+
+# worker 二进制随安装包分发：release 必须去符号（本项目实测 debug_info 约 6-7M/个，
+# 17 个插件合计 120M）。`[profile.*]` 只在发起构建的 workspace 根生效，本独立仓
+# 必须自带一份；与宿主 src-tauri/Cargo.toml 的 release 口径一致。
+[profile.release]
+strip = true
+lto = "thin"
+opt-level = "s"
+codegen-units = 16
